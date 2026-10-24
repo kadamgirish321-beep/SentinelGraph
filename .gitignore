@@ -1,0 +1,40 @@
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+# Original repository history backup
+.git-original-backup/
+
+# Local environment secrets
+.env
+.env.*
+!.env.example
+backend/.env
+recon-service/.env

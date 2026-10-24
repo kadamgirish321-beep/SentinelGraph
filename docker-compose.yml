@@ -1,0 +1,213 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AttackGraphX — Complete Multi-Service Docker Compose Environment
+#
+# Services:
+#   neo4j             — Neo4j Graph Database (:7474 HTTP, :7687 Bolt)
+#   redis             — Message Transport & Cache (:6379)
+#   recon-service     — Person 1: Nmap Reconnaissance Service (:8001 -> :8000)
+#   analysis-service  — Person 2: Attack Graph & What-If Analysis Engine (:9000)
+#   backend           — Person 3: FastAPI Gateway, Auth & Reports (:8000)
+#   frontend          — Person 3: React + Cytoscape Cyber Dashboard (:5173)
+#   web-server        — Lab Target (172.20.0.10:80)
+#   ftp-server        — Lab Target (172.20.0.11:21)
+#   custom-flask-app  — Lab Target (172.20.0.12:5000)
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.8"
+
+services:
+
+  # ── 1. Neo4j Graph Database ──────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5-community
+    container_name: attackgraphx-neo4j
+    hostname: neo4j
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/attackgraphx123
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_memory_pagecache_size: 512M
+      NEO4J_dbms_memory_heap_initial__size: 512M
+      NEO4J_dbms_memory_heap_max__size: 1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - attackgraphx-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── 2. Redis Message Transport & Cache ───────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: attackgraphx-redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - attackgraphx-internal
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── 3. Reconnaissance Service ───────────────────────────────────────────────
+  recon-service:
+    build:
+      context: ./recon-service
+      dockerfile: Dockerfile
+    container_name: attackgraphx-recon
+    hostname: recon-service
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RANGE_CIDR: 172.20.0.0/24
+      RANGE_NETWORK: attackgraphx-net
+      PORT: 8000
+    ports:
+      - "8001:8000"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - attackgraphx-net
+      - attackgraphx-internal
+    restart: unless-stopped
+
+  # ── 4. Analysis Service ──────────────────────────────────────────────────────
+  analysis-service:
+    build:
+      context: ./analysis-service
+      dockerfile: Dockerfile
+    container_name: attackgraphx-analysis
+    hostname: analysis-service
+    environment:
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: 9000
+      REDIS_URL: redis://redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: attackgraphx123
+      RECON_SERVICE_URL: http://recon-service:8000
+    ports:
+      - "9000:9000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - attackgraphx-net
+      - attackgraphx-internal
+    restart: unless-stopped
+
+  # ── 5. API Gateway ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: attackgraphx-gateway
+    hostname: backend
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      JWT_SECRET: super_secret_jwt_key_attackgraphx_dev_2026
+      ANALYSIS_SERVICE_URL: http://analysis-service:9000
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGIN: http://localhost:5173
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      analysis-service:
+        condition: service_started
+    networks:
+      - attackgraphx-internal
+    restart: unless-stopped
+
+  # ── 6. Frontend Dashboard ────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: attackgraphx-frontend
+    hostname: frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - attackgraphx-internal
+    restart: unless-stopped
+
+  # ── 7. Lab Range Targets ─────────────────────────────────────────────────────
+  web-server:
+    image: nginx:1.25-alpine
+    container_name: attackgraphx-web
+    hostname: web-server
+    volumes:
+      - ./recon-service/range/web/index.html:/usr/share/nginx/html/index.html:ro
+    networks:
+      attackgraphx-net:
+        ipv4_address: 172.20.0.10
+    restart: unless-stopped
+
+  ftp-server:
+    image: fauria/vsftpd
+    container_name: attackgraphx-ftp
+    hostname: ftp-server
+    environment:
+      FTP_USER: labftpuser
+      FTP_PASS: labftppass123
+      PASV_ADDRESS: 172.20.0.11
+      PASV_MIN_PORT: 30000
+      PASV_MAX_PORT: 30009
+      ANONYMOUS_ENABLE: "YES"
+    networks:
+      attackgraphx-net:
+        ipv4_address: 172.20.0.11
+    restart: unless-stopped
+
+  custom-flask-app:
+    build:
+      context: ./recon-service/range/custom-app
+      dockerfile: Dockerfile
+    container_name: attackgraphx-flask
+    hostname: custom-flask-app
+    networks:
+      attackgraphx-net:
+        ipv4_address: 172.20.0.12
+    restart: unless-stopped
+
+# ─── Storage Volumes ──────────────────────────────────────────────────────────
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:
+
+# ─── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  attackgraphx-net:
+    name: attackgraphx-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
+  attackgraphx-internal:
+    name: attackgraphx-internal
+    driver: bridge
